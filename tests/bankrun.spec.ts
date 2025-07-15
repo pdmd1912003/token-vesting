@@ -1,110 +1,106 @@
 import * as anchor from "@coral-xyz/anchor";
 import { BankrunProvider } from "anchor-bankrun";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { BN, Program } from "@coral-xyz/anchor";
-
 import {
   startAnchor,
-  Clock,
   BanksClient,
   ProgramTestContext,
+  
 } from "solana-bankrun";
-
-import { createMint, mintTo } from "spl-token-bankrun";
-import { PublicKey, Keypair } from "@solana/web3.js";
+import { createMint, mintTo ,getAccount} from "spl-token-bankrun";
+import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
 import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
-
 import IDL from "../target/idl/token_vesting.json";
 import { TokenVesting } from "../target/types/token_vesting";
-import { SYSTEM_PROGRAM_ID } from "@coral-xyz/anchor/dist/cjs/native/system";
-    
-
-// Import the IDL for the TokenVesting program
 
 describe("Vesting Smart Contract Test", () => {
-    const companyName = "Company";
-    let beneficiary: Keypair;
-    let vestingAccountKey: PublicKey;
-    let treasuryTokenAccount: PublicKey;
-    let employeeAccount:PublicKey;
-    let context: ProgramTestContext;
-    let provider : BankrunProvider;
-    let program :  Program<TokenVesting>;
-    let banksClient : BanksClient;
-    let employer :Keypair; 
-    let mint : PublicKey;
-    let beneficiaryProvider: BankrunProvider;
-    let program2: Program<TokenVesting>;
-    before(async () => {
-        beneficiary = new anchor.web3.Keypair();
-        context = await startAnchor(
-            "",
-            [{ name: "token_vesting", programId: new PublicKey(IDL.address) }],
-            [
-                {
-                    address: beneficiary.publicKey,
-                    info: {
-                        lamports: 1_000_000_000,
-                        data: Buffer.alloc(0),
-                        owner: SYSTEM_PROGRAM_ID,
-                        executable: false,
-                    },
-                },
-            ]
-        );
+  const companyName = "Company";
+  let context: ProgramTestContext;
+  let provider: BankrunProvider;
+  let banksClient: BanksClient;
+  let program: Program<TokenVesting>;
+  let programBeneficiary: Program<TokenVesting>;
+  let employer: Keypair;
+  let beneficiary: Keypair;
+  let mint: PublicKey;
+  let vestingAccount: PublicKey;
+  let treasuryTokenAccount: PublicKey;
+  let employeeAccount: PublicKey;
+  let employeeTokenAccount: PublicKey;
 
-        provider = new BankrunProvider(context);
-        anchor.setProvider(provider);
-        program = new Program<TokenVesting>(IDL as TokenVesting, provider);
-        banksClient = context.banksClient;
-        employer = provider.wallet.payer;
-        mint = await createMint(banksClient, employer, employer.publicKey, null,2 );
-        beneficiaryProvider = new BankrunProvider(context);
-        beneficiaryProvider.wallet = new NodeWallet(beneficiary);
+  before(async () => {
+    beneficiary = Keypair.generate();
+    context = await startAnchor(
+      "",
+      [{ name: "token_vesting", programId: new PublicKey(IDL.address) }],
+      [
+        {
+          address: beneficiary.publicKey,
+          info: { lamports: 1_000_000_000, data: Buffer.alloc(0), owner: SystemProgram.programId, executable: false },
+        },
+      ]
+    );
 
-        program2 = new Program<TokenVesting>(IDL as TokenVesting, beneficiaryProvider);
-        
-        [vestingAccountKey] =PublicKey.findProgramAddressSync(
-            [Buffer.from(companyName)],
-            program.programId
-        );
-        [treasuryTokenAccount] = PublicKey.findProgramAddressSync(
-            [Buffer.from("vesting_treasury"),],
-            program.programId
-        );
+    provider = new BankrunProvider(context);
+    anchor.setProvider(provider);
+    banksClient = context.banksClient;
 
-        [employeeAccount] = PublicKey.findProgramAddressSync(
-            [
-                Buffer.from("employee_vesting"),
-                beneficiary.publicKey.toBuffer(),
-                vestingAccountKey.toBuffer(),
-            ],
-            program.programId
-        );
-        
-    }); 
+    program = new Program<TokenVesting>(IDL as TokenVesting, provider);
+    employer = provider.wallet.payer;
+    console.log("Employer Pubkey:", employer.publicKey.toBase58());
+    
+    mint = await createMint(banksClient, employer, employer.publicKey, null, 2);
+    console.log("Mint Address:", mint.toBase58());  
+    // Derive PDAs
+    [vestingAccount] = PublicKey.findProgramAddressSync([Buffer.from(companyName)], program.programId);
+    console.log("VestingAccount PDA:", vestingAccount.toBase58());
+    [treasuryTokenAccount] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vesting_treasury"), Buffer.from(companyName)],
+      program.programId
+    );
+    console.log("Treasury Token PDA:", treasuryTokenAccount.toBase58());
 
-    it('should create a vesting account', async ()=> {
-        const tx = await program.methods
-        .createVestingAccount(companyName)
-        .accounts({
-            signer: employer.publicKey,
-            mint,
-            tokenProgram:TOKEN_PROGRAM_ID
-        })
-        .rpc({commitment: 'confirmed'});
-        const vestingAccountData = await program.account.vestingAccount.fetch(vestingAccountKey,'confirmed');
-        console.log('Vesting account data', vestingAccountData,null,2);
-        console.log('Create Vesting Account',tx);
+    [employeeAccount] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("employee_vesting"),
+        beneficiary.publicKey.toBuffer(),
+        vestingAccount.toBuffer(),
+      ],
+      program.programId
+    );
+    console.log("Employee Account PDA:", employeeAccount.toBase58());
+
+    // Beneficiary context
+    const beneficiaryProvider = new BankrunProvider(context);
+    beneficiaryProvider.wallet = new NodeWallet(beneficiary);
+    programBeneficiary = new Program<TokenVesting>(IDL as TokenVesting, beneficiaryProvider);
+
+    // Derive employee ATA (Associated Token Account)
+    employeeTokenAccount = await anchor.utils.token.associatedAddress({
+      mint,
+      owner: beneficiary.publicKey,
     });
-    
-    
+  });
 
-    it("should fund the treasury token account", async () => {
-    
-    const amount = 10_000 * 10 ** 9;
-    const mintTx = await mintTo(
-      // @ts-ignores
+  it("should create vesting account", async () => {
+    const tx = await program.methods
+    .createVestingAccount(companyName)
+    .accounts({
+      signer: employer.publicKey,
+      vestingAccount,
+      mint,
+      treasuryTokenAccount,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .rpc();
+  console.log(" Vesting account created:", tx);
+  });
+
+  it("should fund the treasury", async () => {
+    const amount = 1_000_000;
+    const sig = await mintTo(
       banksClient,
       employer,
       mint,
@@ -112,44 +108,46 @@ describe("Vesting Smart Contract Test", () => {
       employer,
       amount
     );
-
-    console.log("Mint to Treasury Transaction Signature:", mintTx);
-  }); 
-  it("should create an employee vesting account", async () => {
-    const tx2 = await program.methods
-      .createEmployeeVesting(new BN(0), new BN(100), new BN(100), new BN(0))
-      .accounts({
-        beneficiary: beneficiary.publicKey,
-        vestingAccount: vestingAccountKey,
-      })
-      .rpc({ commitment: "confirmed", skipPreflight: true });
-
-    console.log("Create Employee Account Transaction Signature:", tx2);
-    console.log("Employee account", employeeAccount.toBase58());
+    console.log("Minted to treasury:", sig);
   });
+
+  it("should create employee vesting", async () => {
+    const start = 0;
+    const end = 100;
+    const total = 1_000_000;
+    const cliff = 0;
+
+    const tx = await program.methods
+    .createEmployeeVesting(new BN(start), new BN(end), new BN(total), new BN(cliff))
+    .accounts({
+      owner: employer.publicKey,
+      beneficiary: beneficiary.publicKey,
+      vestingAccount,
+      employeeAccount,
+      systemProgram: SystemProgram.programId,
+    })
+    .rpc();
+
+  console.log("✅ Employee vesting account created:", tx);
+  });
+
   it("should claim tokens", async () => {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    const currentClock = await banksClient.getClock();
-    context.setClock(
-      new Clock(
-        currentClock.slot,
-        currentClock.epochStartTimestamp,
-        currentClock.epoch,
-        currentClock.leaderScheduleEpoch,
-        BigInt(1000)
-      )
-    );
-
-    console.log("Employee account", employeeAccount.toBase58());
-
-    const tx3 = await program2.methods
+    const sig = await programBeneficiary.methods
       .claimTokens(companyName)
       .accounts({
+        beneficiary: beneficiary.publicKey,
+        employeeAccount,
+        vestingAccount,
+        mint,
+        treasuryTokenAccount,
+        employeeTokenAccount,
         tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
       })
-      .rpc({ commitment: "confirmed" });
-
-    console.log("Claim Tokens transaction signature", tx3);
+      .rpc();
+    console.log("Claimed tokens:", sig);
+    const ataInfo = await getAccount(banksClient, employeeTokenAccount);
+    console.log("Employee ATA balance:", Number(ataInfo.amount));
   });
 });
