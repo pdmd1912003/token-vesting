@@ -128,7 +128,7 @@ describe("Vesting Smart Contract Test", () => {
     })
     .rpc();
 
-  console.log("✅ Employee vesting account created:", tx);
+  console.log("Employee vesting account created:", tx);
   });
 
   it("should claim tokens", async () => {
